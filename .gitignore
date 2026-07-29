@@ -1,0 +1,6 @@
+.streamlit/secrets.toml
+saved_area.json
+__pycache__/
+*.pyc
+.venv/
+venv/
