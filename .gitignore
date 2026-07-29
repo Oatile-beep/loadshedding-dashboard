@@ -1,5 +1,6 @@
 .streamlit/secrets.toml
 saved_area.json
+stage_log.csv
 __pycache__/
 *.pyc
 .venv/

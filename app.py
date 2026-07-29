@@ -7,15 +7,25 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────
 # Confirmed live and working (tested 2026-07-29): v3 area search/nearby are
 # free-tier; v2's areas_search/areas_nearby have been retired (410/deprecated).
 BASE_URL = "https://developer.sepush.co.za/business/3.0"
 BASE_URL_V2 = "https://developer.sepush.co.za/business/2.0"  # /allowance only exists here, not in v3
-SAVED_AREA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_area.json")
+_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVED_AREA_FILE = os.path.join(_DIR, "saved_area.json")
+STAGE_LOG_FILE = os.path.join(_DIR, "stage_log.csv")
+# Real historical event data (start/end timestamps, not just block IDs), published
+# free & unrestricted by the open-source eskom-calendar project. As of testing
+# (2026-07-29) this covers a single ~2-day window (13-15 May 2025) — the project's
+# maintainer notes loadshedding "seems to have stopped", so this is the last known
+# bout, not a multi-year archive. CC BY-NC-SA — attribution required, see README.
+HISTORICAL_CSV_URL = "https://github.com/beyarkay/eskom-calendar/releases/download/latest/machine_friendly.csv"
 st.set_page_config(page_title="Load Shedding Dashboard", page_icon="⚡", layout="wide")
 
 
@@ -38,6 +48,48 @@ def save_area(area: dict):
 def clear_saved_area():
     if os.path.exists(SAVED_AREA_FILE):
         os.remove(SAVED_AREA_FILE)
+
+
+# ── Live stage-log persistence (local CSV, builds real data over time) ──────
+def log_current_stage(stage: str):
+    """Append a (timestamp, stage) row, but only if 30+ min since the last entry
+    or the stage actually changed — avoids flooding the log on every page reload."""
+    now = datetime.now(timezone.utc)
+    if os.path.exists(STAGE_LOG_FILE):
+        try:
+            df = pd.read_csv(STAGE_LOG_FILE, parse_dates=["timestamp"])
+            if not df.empty:
+                last = df.iloc[-1]
+                last_ts = pd.to_datetime(last["timestamp"])
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize("UTC")
+                recent = (now - last_ts) < timedelta(minutes=30)
+                same_stage = str(last["stage"]) == str(stage)
+                if recent and same_stage:
+                    return  # nothing new to log
+        except (pd.errors.EmptyDataError, KeyError):
+            pass
+    header = not os.path.exists(STAGE_LOG_FILE)
+    with open(STAGE_LOG_FILE, "a") as f:
+        if header:
+            f.write("timestamp,stage\n")
+        f.write(f"{now.isoformat()},{stage}\n")
+
+
+def load_stage_log():
+    if os.path.exists(STAGE_LOG_FILE):
+        try:
+            df = pd.read_csv(STAGE_LOG_FILE, parse_dates=["timestamp"])
+            return df if not df.empty else None
+        except pd.errors.EmptyDataError:
+            return None
+    return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_historical_data():
+    df = pd.read_csv(HISTORICAL_CSV_URL, parse_dates=["start", "finsh"])
+    return df
 
 
 # ── API helpers ───────────────────────────────────────────────────────────
@@ -177,7 +229,9 @@ if not token:
     st.info("Add your API token in the sidebar to begin.")
     st.stop()
 
-tab_overview, tab_schedule, tab_quota = st.tabs(["🇿🇦 National Status", "📍 My Area", "📊 API Quota"])
+tab_overview, tab_schedule, tab_trends, tab_quota = st.tabs(
+    ["🇿🇦 National Status", "📍 My Area", "📈 Trends", "📊 API Quota"]
+)
 
 # ── Tab 1: National status ───────────────────────────────────────────────
 with tab_overview:
@@ -186,6 +240,8 @@ with tab_overview:
         eskom = status.get("status", {}).get("eskom", {})
         stage = eskom.get("stage", "0")
         next_stages = eskom.get("next_stages", [])
+
+        log_current_stage(stage)  # feeds the live history in the Trends tab
 
         col1, col2 = st.columns([1, 2])
         with col1:
@@ -241,7 +297,91 @@ with tab_schedule:
         except requests.HTTPError as e:
             st.error(f"Could not fetch area info: {e}")
 
-# ── Tab 3: Quota ──────────────────────────────────────────────────────────
+# ── Tab 3: Trends ─────────────────────────────────────────────────────────
+with tab_trends:
+    st.subheader("📡 Live stage history")
+    st.caption("Logged automatically each time this dashboard runs — builds real data over time.")
+
+    log_df = load_stage_log()
+    if log_df is None or len(log_df) < 2:
+        st.info(
+            "Not enough logged data yet — check back after visiting the dashboard a few more "
+            "times (spaced 30+ minutes apart). Every visit adds one data point."
+        )
+        if log_df is not None:
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
+    else:
+        fig_log = go.Figure()
+        fig_log.add_trace(go.Scatter(
+            x=log_df["timestamp"], y=log_df["stage"].astype(int),
+            mode="lines+markers", line_shape="hv", name="Stage",
+        ))
+        fig_log.update_layout(
+            title="National stage over time (as logged by this app)",
+            yaxis_title="Stage", xaxis_title="",
+            yaxis=dict(dtick=1),
+        )
+        st.plotly_chart(fig_log, use_container_width=True)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write("**Time spent at each stage (of logged checks)**")
+            counts = log_df["stage"].value_counts().sort_index()
+            st.bar_chart(counts)
+        with col_b:
+            st.write("**Recent log entries**")
+            st.dataframe(log_df.tail(10).iloc[::-1], use_container_width=True, hide_index=True)
+
+        first_logged = log_df["timestamp"].min()
+        st.caption(f"Logging since {first_logged.strftime('%Y-%m-%d %H:%M')} · {len(log_df)} entries recorded.")
+
+    st.divider()
+    st.subheader("🗓️ Last known load shedding period")
+    st.caption(
+        "Real historical outage timestamps (not just block IDs) from the open-source "
+        "[eskom-calendar](https://github.com/beyarkay/eskom-calendar) project. As of now, this "
+        "covers a single ~2-day window in **May 2025** — its maintainer notes load shedding "
+        "appears to have stopped, so this is the last recorded bout rather than a multi-year "
+        "archive. Data used under CC BY-NC-SA 4.0, credit: eskom-calendar."
+    )
+
+    try:
+        hist = load_historical_data()
+        area_filter = st.text_input(
+            "Filter by area name (partial match)", placeholder="e.g. kwazulu-natal, ethekwini, ballito"
+        )
+        filtered = hist[hist["area_name"].str.contains(area_filter, case=False)] if area_filter else hist
+
+        if filtered.empty:
+            st.info("No matching areas in this dataset for that filter.")
+        else:
+            st.caption(f"{filtered['area_name'].nunique()} areas, {len(filtered)} outage events in this window.")
+
+            top_areas = filtered["area_name"].value_counts().head(15)
+            fig_areas = px.bar(
+                top_areas, orientation="h",
+                title="Outage events by area (top 15 in this window)",
+                labels={"value": "Number of events", "index": "Area"},
+            )
+            fig_areas.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+            st.plotly_chart(fig_areas, use_container_width=True)
+
+            dur_mins = (filtered["finsh"] - filtered["start"]).dt.total_seconds() / 60
+            col_c, col_d, col_e = st.columns(3)
+            col_c.metric("Avg. outage length", f"{dur_mins.mean():.0f} min")
+            col_d.metric("Most common stage", str(filtered["stage"].mode().iloc[0]))
+            col_e.metric("Events shown", len(filtered))
+
+            with st.expander("View raw events"):
+                st.dataframe(
+                    filtered[["area_name", "start", "finsh", "stage"]].sort_values("start"),
+                    use_container_width=True, hide_index=True,
+                )
+
+    except Exception as e:
+        st.warning(f"Could not load historical data: {e}")
+
+# ── Tab 4: Quota ──────────────────────────────────────────────────────────
 with tab_quota:
     try:
         allowance = get_allowance(token).get("allowance", {})
