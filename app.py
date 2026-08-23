@@ -97,15 +97,27 @@ def make_api_request(endpoint: str, token: str, params: dict = None):
     
     r = requests.get(url, headers=headers, params=params, timeout=10)
     
-    # Extract API quota metrics from v3 headers
-    if "x-account-quota-remaining" in r.headers:
+    # Check all common ESP header naming variants for remaining calls
+    remaining_header = (
+        r.headers.get("x-account-quota-remaining") or 
+        r.headers.get("x-count-remaining") or 
+        r.headers.get("x-quota-remaining")
+    )
+    limit_header = (
+        r.headers.get("x-account-quota-limit") or 
+        r.headers.get("x-count-limit") or 
+        r.headers.get("x-quota-limit")
+    )
+
+    if remaining_header is not None:
         try:
-            st.session_state["quota_remaining"] = int(r.headers["x-account-quota-remaining"])
+            st.session_state["quota_remaining"] = int(remaining_header)
         except ValueError:
             pass
-    if "x-account-quota-limit" in r.headers:
+            
+    if limit_header is not None:
         try:
-            st.session_state["quota_limit"] = int(r.headers["x-account-quota-limit"])
+            st.session_state["quota_limit"] = int(limit_header)
         except ValueError:
             pass
             
