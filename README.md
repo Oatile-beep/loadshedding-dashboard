@@ -40,26 +40,11 @@ plain local files — this is what makes them simple and free, but it means:
   long-term trend-building, run it locally or upgrade to a real database
   later (SQLite on a persistent volume, or a free tier of Supabase/Postgres).
 
-## A note on the API (important context)
+### A note on the API (v3.0 Migration)
 
-EskomSePush has restructured their API since most tutorials online were
-written. As of testing (July 2026):
-
-- **v3** (`business/3.0`) is required for `areas_search` and `areas_nearby` —
-  the old v2 versions of these now return `410 Gone` (search) or a
-  "deprecated" error (nearby), since the docs moved without a matching redirect.
-- **v2** (`business/2.0`) still serves `/status` largely unchanged, but its
-  `/allowance` (quota check) endpoint currently 404s under both versions —
-  it appears to have been retired without a documented replacement. The app
-  handles this gracefully rather than erroring.
-- v3's `/area` endpoint returns which grid **blocks** apply to an area
-  (e.g. `eskdo-11` for loadshedding, `eskomkwazulunatallr-e` for load
-  reduction) but not ready-made event timestamps the way v2 used to. For
-  exact time slots, check the [EskomSePush app](https://sepush.co.za/)
-  directly with the area name this dashboard finds for you.
-
-If EskomSePush changes their API again, `BASE_URL` and `BASE_URL_V2` near the
-top of `app.py` are the two places to look first.
+* **All Endpoints on v3.0:** As of September 2026, API v2.0 is fully switched off. All calls (`/status`, `/areas_search`, `/areas_nearby`, `/area`) use the `/business/3.0/` base URL path.
+* **Quota Tracking:** The retired `/allowance` endpoint has been replaced with dynamic quota tracking. API rate limits and daily call counts are read directly from `x-account-quota-remaining` and `x-account-quota-limit` HTTP response headers.
+* **Schedule IDs:** Area queries in v3 use simplified schedule IDs (e.g., `eskde-10` rather than the legacy `eskde-10-fourways` format).
 
 ## Setup (local)
 
