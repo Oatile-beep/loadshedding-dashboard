@@ -393,4 +393,4 @@ with tab_quota:
         st.info("Quota statistics will update here automatically as soon as the dashboard makes an active API request.")
 
 st.divider()
-st.caption("Built with Streamlit · Data via [EskomSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")omSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")
+st.caption("Built with Streamlit · Data via [EskomSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")
