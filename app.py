@@ -90,59 +90,71 @@ def load_historical_data():
 
 
 # ── Centralized v3.0 Request Handler ──────────────────────────────────────
-def make_api_request(endpoint: str, token: str, params: dict = None):
-    """Executes requests against API v3.0 and extracts quota info directly from HTTP headers."""
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_from_api(endpoint: str, token: str, params: tuple = ()):
+    """Fetch data from ESP API v3.0 and return both payload and quota headers."""
     headers = {"token": token}
     url = f"{BASE_URL}/{endpoint}"
-    
-    r = requests.get(url, headers=headers, params=params, timeout=10)
-    
-    # Check all common ESP header naming variants for remaining calls
-    remaining_header = (
-        r.headers.get("x-account-quota-remaining") or 
-        r.headers.get("x-count-remaining") or 
-        r.headers.get("x-quota-remaining")
-    )
-    limit_header = (
-        r.headers.get("x-account-quota-limit") or 
-        r.headers.get("x-count-limit") or 
-        r.headers.get("x-quota-limit")
-    )
+    params_dict = dict(params) if params else None
 
-    if remaining_header is not None:
-        try:
-            st.session_state["quota_remaining"] = int(remaining_header)
-        except ValueError:
-            pass
-            
-    if limit_header is not None:
-        try:
-            st.session_state["quota_limit"] = int(limit_header)
-        except ValueError:
-            pass
-            
+    r = requests.get(url, headers=headers, params=params_dict, timeout=10)
     r.raise_for_status()
-    return r.json()
+
+    # Extract quota information from response headers
+    headers_lower = {k.lower(): v for k, v in r.headers.items()}
+    remaining = (
+        headers_lower.get("x-account-quota-remaining") or
+        headers_lower.get("x-count-remaining") or
+        headers_lower.get("x-quota-remaining")
+    )
+    limit = (
+        headers_lower.get("x-account-quota-limit") or
+        headers_lower.get("x-count-limit") or
+        headers_lower.get("x-quota-limit")
+    )
+
+    quota_info = {}
+    if remaining is not None:
+        try:
+            quota_info["remaining"] = int(remaining)
+        except ValueError:
+            pass
+    if limit is not None:
+        try:
+            quota_info["limit"] = int(limit)
+        except ValueError:
+            pass
+
+    return r.json(), quota_info
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+def make_api_request(endpoint: str, token: str, params: dict = None):
+    """Wrapper that updates session_state on every app run, even when payload is cached."""
+    param_tuple = tuple(sorted(params.items())) if params else ()
+    data, quota_info = _fetch_from_api(endpoint, token, param_tuple)
+
+    if "remaining" in quota_info:
+        st.session_state["quota_remaining"] = quota_info["remaining"]
+    if "limit" in quota_info:
+        st.session_state["quota_limit"] = quota_info["limit"]
+
+    return data
+
+
 def get_status(token: str):
     return make_api_request("status", token)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def search_areas(token: str, text: str):
     data = make_api_request("areas_search", token, params={"text": text})
     return data.get("areas", [])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def nearby_areas(token: str, lat: float, lon: float):
     data = make_api_request("areas_nearby", token, params={"lat": lat, "lon": lon})
     return data.get("areas", [])
 
 
-@st.cache_data(ttl=600, show_spinner=False)
 def get_area_info(token: str, area_id: str):
     return make_api_request("area", token, params={"id": area_id})
 
@@ -384,7 +396,7 @@ with tab_trends:
 # ── Tab 4: Quota ──────────────────────────────────────────────────────────
 with tab_quota:
     st.subheader("📊 API Usage & Quota (v3.0)")
-    
+
     remaining = st.session_state.get("quota_remaining")
     limit = st.session_state.get("quota_limit", 50)  # Default fallback to 50
 
