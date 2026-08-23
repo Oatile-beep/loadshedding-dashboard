@@ -13,23 +13,22 @@ import os
 from datetime import datetime, timedelta, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────
-# Confirmed live and working (tested 2026-07-29): v3 area search/nearby are
-# free-tier; v2's areas_search/areas_nearby have been retired (410/deprecated).
 BASE_URL = "https://developer.sepush.co.za/business/3.0"
-BASE_URL_V2 = "https://developer.sepush.co.za/business/2.0"  # /allowance only exists here, not in v3
 _DIR = os.path.dirname(os.path.abspath(__file__))
 SAVED_AREA_FILE = os.path.join(_DIR, "saved_area.json")
 STAGE_LOG_FILE = os.path.join(_DIR, "stage_log.csv")
-# Real historical event data (start/end timestamps, not just block IDs), published
-# free & unrestricted by the open-source eskom-calendar project. As of testing
-# (2026-07-29) this covers a single ~2-day window (13-15 May 2025) — the project's
-# maintainer notes loadshedding "seems to have stopped", so this is the last known
-# bout, not a multi-year archive. CC BY-NC-SA — attribution required, see README.
+
 HISTORICAL_CSV_URL = "https://github.com/beyarkay/eskom-calendar/releases/download/latest/machine_friendly.csv"
 st.set_page_config(page_title="Load Shedding Dashboard", page_icon="⚡", layout="wide")
 
+# Initialize quota state if not present
+if "quota_remaining" not in st.session_state:
+    st.session_state["quota_remaining"] = None
+if "quota_limit" not in st.session_state:
+    st.session_state["quota_limit"] = None
 
-# ── Saved-area persistence (local file, no token stored) ────────────────────
+
+# ── Saved-area persistence ─────────────────────────────────────────────────
 def load_saved_area():
     if os.path.exists(SAVED_AREA_FILE):
         try:
@@ -50,10 +49,8 @@ def clear_saved_area():
         os.remove(SAVED_AREA_FILE)
 
 
-# ── Live stage-log persistence (local CSV, builds real data over time) ──────
+# ── Live stage-log persistence ─────────────────────────────────────────────
 def log_current_stage(stage: str):
-    """Append a (timestamp, stage) row, but only if 30+ min since the last entry
-    or the stage actually changed — avoids flooding the log on every page reload."""
     now = datetime.now(timezone.utc)
     if os.path.exists(STAGE_LOG_FILE):
         try:
@@ -66,7 +63,7 @@ def log_current_stage(stage: str):
                 recent = (now - last_ts) < timedelta(minutes=30)
                 same_stage = str(last["stage"]) == str(stage)
                 if recent and same_stage:
-                    return  # nothing new to log
+                    return
         except (pd.errors.EmptyDataError, KeyError):
             pass
     header = not os.path.exists(STAGE_LOG_FILE)
@@ -92,66 +89,61 @@ def load_historical_data():
     return df
 
 
-# ── API helpers ───────────────────────────────────────────────────────────
-def _headers(token: str) -> dict:
-    return {"token": token}
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def get_allowance(token: str):
-    r = requests.get(f"{BASE_URL}/allowance", headers=_headers(token), timeout=10)
-    if r.status_code == 404:
-        # /allowance isn't on v3 yet — fall back to v2, which still serves it.
-        r = requests.get(f"{BASE_URL_V2}/allowance", headers=_headers(token), timeout=10)
+# ── Centralized v3.0 Request Handler ──────────────────────────────────────
+def make_api_request(endpoint: str, token: str, params: dict = None):
+    """Executes requests against API v3.0 and extracts quota info directly from HTTP headers."""
+    headers = {"token": token}
+    url = f"{BASE_URL}/{endpoint}"
+    
+    r = requests.get(url, headers=headers, params=params, timeout=10)
+    
+    # Extract API quota metrics from v3 headers
+    if "x-account-quota-remaining" in r.headers:
+        try:
+            st.session_state["quota_remaining"] = int(r.headers["x-account-quota-remaining"])
+        except ValueError:
+            pass
+    if "x-account-quota-limit" in r.headers:
+        try:
+            st.session_state["quota_limit"] = int(r.headers["x-account-quota-limit"])
+        except ValueError:
+            pass
+            
     r.raise_for_status()
     return r.json()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_status(token: str):
-    r = requests.get(f"{BASE_URL}/status", headers=_headers(token), timeout=10)
-    r.raise_for_status()
-    return r.json()
+    return make_api_request("status", token)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_areas(token: str, text: str):
-    r = requests.get(
-        f"{BASE_URL}/areas_search", headers=_headers(token), params={"text": text}, timeout=10
-    )
-    r.raise_for_status()
-    return r.json().get("areas", [])
+    data = make_api_request("areas_search", token, params={"text": text})
+    return data.get("areas", [])
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def nearby_areas(token: str, lat: float, lon: float):
-    r = requests.get(
-        f"{BASE_URL}/areas_nearby", headers=_headers(token),
-        params={"lat": lat, "lon": lon}, timeout=10,
-    )
-    r.raise_for_status()
-    return r.json().get("areas", [])
+    data = make_api_request("areas_nearby", token, params={"lat": lat, "lon": lon})
+    return data.get("areas", [])
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_area_info(token: str, area_id: str):
-    r = requests.get(f"{BASE_URL}/area", headers=_headers(token), params={"id": area_id}, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    return make_api_request("area", token, params={"id": area_id})
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
 st.sidebar.title("⚡ Settings")
 
-# On Streamlit Community Cloud, set ESP_API_TOKEN in the app's Secrets instead
-# of typing it in every visit. Locally (no secrets.toml file), this safely
-# falls through to the manual sidebar field below.
 try:
     token = st.secrets["ESP_API_TOKEN"]
 except (KeyError, FileNotFoundError):
     token = ""
 except Exception:
-    token = ""  # covers StreamlitSecretNotFoundError when no secrets.toml exists at all
+    token = ""
 
 if token:
     st.sidebar.success("Using API token from app secrets.")
@@ -212,8 +204,7 @@ if results:
 elif (area_query or (lat_input and lon_input)) and token:
     st.sidebar.info("No matching areas found.")
 
-# Manual area ID fallback
-manual_id = st.sidebar.text_input("...or paste an Area ID directly", placeholder="za_kzn_dc28_vulindlela_ypa8")
+manual_id = st.sidebar.text_input("...or paste an Area ID directly", placeholder="eskde-10")
 if manual_id:
     selected_area = {"id": manual_id, "name": manual_id, "municipality": "", "province": ""}
     if st.sidebar.button("📌 Save this ID as my area"):
@@ -223,7 +214,7 @@ if manual_id:
 
 # ── Header ────────────────────────────────────────────────────────────────
 st.title("⚡ Load Shedding Dashboard")
-st.caption("Live outage stage, area lookup and quota — data from EskomSePush")
+st.caption("Live outage stage, area lookup and quota — data from EskomSePush API v3")
 
 if not token:
     st.info("Add your API token in the sidebar to begin.")
@@ -241,7 +232,7 @@ with tab_overview:
         stage = eskom.get("stage", "0")
         next_stages = eskom.get("next_stages", [])
 
-        log_current_stage(stage)  # feeds the live history in the Trends tab
+        log_current_stage(stage)
 
         col1, col2 = st.columns([1, 2])
         with col1:
@@ -288,8 +279,7 @@ with tab_schedule:
                     "The free API confirms which grid blocks apply here, along with the current "
                     "national stage above — but exact time-slot schedules for a specific block aren't "
                     "exposed on the free tier. For exact times, check the "
-                    "[EskomSePush app](https://sepush.co.za/) with this area name, or your "
-                    "municipality's official load shedding schedule."
+                    "[EskomSePush app](https://sepush.co.za/) with this area name."
                 )
             else:
                 st.success("No load shedding or load reduction schedules linked to this area.")
@@ -339,10 +329,8 @@ with tab_trends:
     st.subheader("🗓️ Last known load shedding period")
     st.caption(
         "Real historical outage timestamps (not just block IDs) from the open-source "
-        "[eskom-calendar](https://github.com/beyarkay/eskom-calendar) project. As of now, this "
-        "covers a single ~2-day window in **May 2025** — its maintainer notes load shedding "
-        "appears to have stopped, so this is the last recorded bout rather than a multi-year "
-        "archive. Data used under CC BY-NC-SA 4.0, credit: eskom-calendar."
+        "[eskom-calendar](https://github.com/beyarkay/eskom-calendar) project. "
+        "Data used under CC BY-NC-SA 4.0, credit: eskom-calendar."
     )
 
     try:
@@ -383,34 +371,26 @@ with tab_trends:
 
 # ── Tab 4: Quota ──────────────────────────────────────────────────────────
 with tab_quota:
-    try:
-        allowance = get_allowance(token).get("allowance", {})
-        count = allowance.get("count", 0)
-        limit = allowance.get("limit", 50)
-        remaining = max(limit - count, 0)
+    st.subheader("📊 API Usage & Quota (v3.0)")
+    
+    remaining = st.session_state.get("quota_remaining")
+    limit = st.session_state.get("quota_limit", 50)  # Default fallback to 50
 
+    if remaining is not None:
+        used = limit - remaining if limit else 0
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=count,
-            title={"text": "API calls used today"},
+            value=remaining,
+            title={"text": "API Calls Remaining"},
             gauge={
                 "axis": {"range": [0, limit]},
-                "bar": {"color": "#e74c3c" if count > limit * 0.8 else "#2ecc71"},
+                "bar": {"color": "#e74c3c" if remaining < limit * 0.2 else "#2ecc71"},
             },
         ))
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"{remaining} of {limit} calls remaining today. Checking allowance is free and doesn't use quota.")
-
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            st.info(
-                "Quota checking isn't available on the current free API version — EskomSePush "
-                "appears to have retired the `/allowance` endpoint. The free tier is documented as "
-                "50 requests/day; this dashboard caches results (10–60 min per tab) to stay well "
-                "within that without needing to check live."
-            )
-        else:
-            st.error(f"Could not fetch quota info: {e}")
+        st.caption(f"In API v3.0, quota metrics are dynamically read from HTTP response headers. You have used ~{used} of your {limit} daily calls.")
+    else:
+        st.info("Quota statistics will update here automatically as soon as the dashboard makes an active API request.")
 
 st.divider()
-st.caption("Built with Streamlit · Data via [EskomSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")
+st.caption("Built with Streamlit · Data via [EskomSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")omSePush](https://sepush.co.za) · Not affiliated with Eskom or EskomSePush.")
